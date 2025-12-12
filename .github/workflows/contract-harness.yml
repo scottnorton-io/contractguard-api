@@ -1,0 +1,84 @@
+name: Contract Harness
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Build SUT image
+        run: |
+          docker build \
+            --build-arg GIT_COMMIT=$ github.sha  \
+            --build-arg BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+            -t sut:dev \
+            .
+      
+      - name: Start SUT harness
+        run: |
+          docker compose -f compose/sut.compose.yaml up -d
+          sleep 10
+      
+      - name: Run contract tests
+        run: |
+          chmod +x scripts/contract-test.sh
+          ./scripts/contract-test.sh
+      
+      - name: Check SUT logs
+        if: always()
+        run: docker compose -f compose/sut.compose.yaml logs sut
+      
+      - name: Cleanup
+        if: always()
+        run: docker compose -f compose/sut.compose.yaml down -v
+  
+  policy-check:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run P0 policy checks
+        run: |
+          chmod +x scripts/policy-check.sh
+          ./scripts/policy-check.sh
+  
+  scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build image
+        run: docker build -t contractguard:$ github.sha  .
+      
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+      
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+      
+      - name: Generate SBOM
+        run: |
+          syft contractguard:$ github.sha  -o spdx-json > sbom.json
+      
+      - name: Scan for vulnerabilities
+        run: |
+          grype contractguard:$ github.sha  --fail-on high
+      
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-$ github.sha 
+          path: sbom.json
